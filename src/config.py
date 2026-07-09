@@ -1,7 +1,7 @@
 import os
 
 
-APP_TITLE = "Climaservice - Dossier Fotovoltaico MVP V5"
+APP_TITLE = "Climaservice - Preventivatore Fotovoltaico"
 PASSWORD = os.getenv("CLIMASERVICE_APP_PASSWORD", "climaservice")
 
 BRAND_BLUE = "#071A3A"

@@ -88,6 +88,41 @@ def firma_catalogo(app_dir):
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1.6rem;
+        padding-bottom: 2rem;
+    }
+    div.stButton > button, div.stDownloadButton > button {
+        width: 100%;
+        min-height: 2.7rem;
+    }
+    [data-testid="stMetric"] {
+        background: #f6f8fb;
+        border: 1px solid #e7ebf0;
+        padding: 0.8rem 0.9rem;
+        border-radius: 8px;
+    }
+    @media (max-width: 760px) {
+        .block-container {
+            padding-left: 0.8rem;
+            padding-right: 0.8rem;
+        }
+        h1 {
+            font-size: 1.55rem !important;
+            line-height: 1.2 !important;
+        }
+        h2, h3 {
+            font-size: 1.15rem !important;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 if "logged" not in st.session_state:
     st.session_state.logged = False
 
@@ -108,8 +143,8 @@ with header_col_logo:
     if os.path.exists(logo_path):
         st.image(logo_path, width=170)
 with header_col_title:
-    st.title("Dossier Fotovoltaico Climaservice - MVP V5")
-    st.caption("Versione corretta per Windows - incentivi flessibili - PVGIS reale - consiglio impianto")
+    st.title("Preventivatore Fotovoltaico Climaservice")
+    st.caption("Calcolo rendimento, proposta economica e documenti commerciali")
 
 if st.button("Nuovo preventivo / cancella dati caricati"):
     for key in list(st.session_state.keys()):
@@ -122,6 +157,18 @@ if st.button("Aggiorna listini e schede tecniche"):
     st.success("Listini e schede tecniche riletti.")
     st.rerun()
 
+modalita_lavoro = st.radio(
+    "Modalita lavoro",
+    ["Preventivo rapido", "Preventivo dettagliato"],
+    index=0,
+    horizontal=True,
+)
+mostra_dettagli = modalita_lavoro == "Preventivo dettagliato"
+st.caption(
+    "Rapido: mostra solo i dati essenziali per arrivare al risultato. "
+    "Dettagliato: apre anche verifiche, mensili, parametri tecnici e ipotesi economiche."
+)
+
 col1, col2 = st.columns([1, 1])
 catalogo = carica_catalogo_cached(os.path.dirname(__file__), firma_catalogo(os.path.dirname(__file__)))
 
@@ -132,7 +179,6 @@ with col1:
     bill = extract_bill_data(extracted_text) if extracted_text else {}
 
     if uploaded:
-        st.markdown("**Check lettura bolletta**")
         anagrafica_ok = bool(bill.get("cliente") or bill.get("indirizzo") or bill.get("pod"))
         annuale_ok = bool(bill.get("consumi_annui_kwh"))
         mese_ok = bool(bill.get("consumo_mese_kwh"))
@@ -167,11 +213,17 @@ with col1:
                 "Valore": f"{bill.get('costo_energia_stimato'):.3f} EUR/kWh" if costo_ok else "da inserire manualmente",
             },
         ]
-        st.dataframe(status_rows, hide_index=True, use_container_width=True)
-        if mensili_ok:
-            st.caption("Consumi mensili letti dalla bolletta: " + " | ".join(kwh(value) for value in mensili))
+        if anagrafica_ok or annuale_ok or mese_ok or costo_ok or mensili_ok:
+            st.success("Bolletta caricata. Controlla e correggi sotto solo i dati mancanti.")
         else:
-            st.warning("Non ho trovato un dettaglio affidabile dei consumi mese per mese. Il grafico confrontera' la produzione mensile con una media mensile ottenuta dal consumo annuo.")
+            st.warning("Bolletta caricata, ma i dati principali non sono stati letti. Compila manualmente i campi sotto.")
+
+        with st.expander("Controllo lettura bolletta", expanded=mostra_dettagli):
+            st.dataframe(status_rows, hide_index=True, use_container_width=True)
+            if mensili_ok:
+                st.caption("Consumi mensili letti dalla bolletta: " + " | ".join(kwh(value) for value in mensili))
+            else:
+                st.warning("Non ho trovato un dettaglio affidabile dei consumi mese per mese. Il grafico confrontera' la produzione mensile con una media mensile ottenuta dal consumo annuo.")
 
     cliente = st.text_input("Cliente", bill.get("cliente", ""))
     indirizzo = st.text_input("Indirizzo", bill.get("indirizzo", ""))
@@ -185,9 +237,10 @@ with col1:
     consumi_annui = st.number_input("Consumi annui stimati (kWh)", value=consumi_annui_default, step=100.0)
     costo_energia = st.number_input("Costo energia EUR/kWh", value=costo_energia_default, step=0.01, format="%.3f")
 
-    f1 = st.number_input("Consumo F1 periodo (kWh)", value=float(bill.get("f1") or 0), step=1.0)
-    f2 = st.number_input("Consumo F2 periodo (kWh)", value=float(bill.get("f2") or 0), step=1.0)
-    f3 = st.number_input("Consumo F3 periodo (kWh)", value=float(bill.get("f3") or 0), step=1.0)
+    with st.expander("Dettaglio fasce F1/F2/F3", expanded=mostra_dettagli):
+        f1 = st.number_input("Consumo F1 periodo (kWh)", value=float(bill.get("f1") or 0), step=1.0)
+        f2 = st.number_input("Consumo F2 periodo (kWh)", value=float(bill.get("f2") or 0), step=1.0)
+        f3 = st.number_input("Consumo F3 periodo (kWh)", value=float(bill.get("f3") or 0), step=1.0)
 
     if bill.get("consumo_mese_kwh"):
         consumo_mese_fonte = bill.get("consumo_mese_fonte") or "Letto dalla bolletta"
@@ -223,22 +276,22 @@ with col1:
             use_container_width=True,
         )
 
-    st.markdown("**Consumi mese per mese dell'abitazione**")
-    st.caption("Se la bolletta non li legge correttamente, inseriscili manualmente: saranno usati nel grafico di confronto con la produzione PVGIS.")
     bill_monthly_values = bill.get("consumi_mensili_kwh") or []
     default_monthly_values = bill_monthly_values if len(bill_monthly_values) == 12 else [0] * 12
     upload_signature = f"{uploaded.name}_{uploaded.size}" if uploaded else "manuale"
-    monthly_cols = st.columns(4)
     consumi_mensili_input = []
-    for idx, label in enumerate(MONTH_LABELS):
-        with monthly_cols[idx % 4]:
-            value = st.number_input(
-                f"{label} kWh",
-                value=float(default_monthly_values[idx]),
-                step=1.0,
-                key=f"consumo_mensile_{upload_signature}_{idx}",
-            )
-            consumi_mensili_input.append(value)
+    with st.expander("Consumi mese per mese", expanded=mostra_dettagli or len(bill_monthly_values) == 12):
+        st.caption("Se la bolletta non li legge correttamente, inseriscili manualmente: saranno usati nel grafico di confronto con la produzione PVGIS.")
+        monthly_cols = st.columns(4)
+        for idx, label in enumerate(MONTH_LABELS):
+            with monthly_cols[idx % 4]:
+                value = st.number_input(
+                    f"{label} kWh",
+                    value=float(default_monthly_values[idx]),
+                    step=1.0,
+                    key=f"consumo_mensile_{upload_signature}_{idx}",
+                )
+                consumi_mensili_input.append(value)
 
     consumi_mensili_completi = all(value > 0 for value in consumi_mensili_input)
     mensili_letti_senza_modifiche = (
@@ -308,18 +361,22 @@ with col2:
     else:
         batteria_scelta = None
 
-    tipo_pannelli = st.text_input("Tipo pannelli", pannello_scelto.get("tipo_pannelli", "TRINA SOLAR"))
-    modello_pannelli = st.text_input("Modello pannelli", pannello_scelto.get("modello_pannelli", "TSM-NEG9R.28"))
-    potenza_pannello_wp = st.number_input("Potenza singolo pannello (Wp)", value=float(pannello_scelto.get("potenza_pannello_wp") or 465.0), step=5.0)
+    with st.expander("Dettagli tecnici pannello e inverter", expanded=mostra_dettagli):
+        tipo_pannelli = st.text_input("Tipo pannelli", pannello_scelto.get("tipo_pannelli", "TRINA SOLAR"))
+        modello_pannelli = st.text_input("Modello pannelli", pannello_scelto.get("modello_pannelli", "TSM-NEG9R.28"))
+        potenza_pannello_wp = st.number_input("Potenza singolo pannello (Wp)", value=float(pannello_scelto.get("potenza_pannello_wp") or 465.0), step=5.0)
     numero_pannelli_default = max(1, int(round(suggested_kwp * 1000 / max(potenza_pannello_wp, 1))))
     numero_pannelli = st.number_input("Numero pannelli", value=numero_pannelli_default, step=1)
     potenza_kwp_calcolata = round(float(numero_pannelli) * float(potenza_pannello_wp) / 1000, 2)
-    potenza_kwp = st.number_input("Potenza impianto proposta (kWp)", value=float(potenza_kwp_calcolata), step=0.01)
+    st.metric("Potenza impianto", f"{potenza_kwp_calcolata:.2f} kWp")
+    potenza_kwp = potenza_kwp_calcolata
     configurazione_scelta = configurazione_da_pannello(configurazioni_listino, pannello_scelto, numero_pannelli)
     if not configurazione_scelta:
         configurazione_scelta = {**pannello_scelto, "numero_pannelli": int(numero_pannelli), "potenza_kwp": potenza_kwp, "prezzo_iva": 0}
     moduli = f"{numero_pannelli} x {potenza_pannello_wp:.0f} W"
-    inverter = st.text_input("Inverter", configurazione_scelta.get("inverter") or pannello_scelto.get("inverter", "SAJ"))
+    with st.expander("Modifica potenza o inverter", expanded=mostra_dettagli):
+        potenza_kwp = st.number_input("Potenza impianto proposta (kWp)", value=float(potenza_kwp_calcolata), step=0.01)
+        inverter = st.text_input("Inverter", configurazione_scelta.get("inverter") or pannello_scelto.get("inverter", "SAJ"))
     batteria_default = batteria_scelta.get("marca_modello") if batteria_scelta else "Nessuna batteria"
     batteria = st.text_input("Batteria", batteria_default)
     accumulo_kwh = st.number_input("Accumulo (kWh)", value=float((batteria_scelta or {}).get("capacita_kwh") or 0), step=1.0)
@@ -338,15 +395,15 @@ with col2:
             st.write(f"Scheda batteria: {batteria_scelta['scheda_tecnica']}")
 
 st.subheader("3. Localizzazione e PVGIS reale")
-gc1, gc2, gc3, gc4 = st.columns(4)
-with gc1:
-    indirizzo_pvgis = st.text_input("Indirizzo per coordinate", f"{indirizzo}, {localita}, Italia")
-with gc2:
-    orientamento = st.number_input("Orientamento PVGIS", value=0.0, step=1.0, help="0=sud, +/-90 est/ovest, 180 nord")
-with gc3:
-    inclinazione = st.number_input("Inclinazione", value=25.0, step=1.0)
-with gc4:
-    perdite = st.number_input("Perdite sistema %", value=14.0, step=1.0)
+indirizzo_pvgis = st.text_input("Indirizzo impianto", f"{indirizzo}, {localita}, Italia")
+with st.expander("Dati tecnici PVGIS", expanded=mostra_dettagli):
+    gc1, gc2, gc3 = st.columns(3)
+    with gc1:
+        orientamento = st.number_input("Orientamento PVGIS", value=0.0, step=1.0, help="0=sud, +/-90 est/ovest, 180 nord")
+    with gc2:
+        inclinazione = st.number_input("Inclinazione", value=25.0, step=1.0)
+    with gc3:
+        perdite = st.number_input("Perdite sistema %", value=14.0, step=1.0)
 
 if "lat" not in st.session_state:
     st.session_state.lat = 46.138
@@ -366,7 +423,7 @@ def aggiorna_pvgis(lat_value, lon_value):
     st.success(f"PVGIS calcolato: {annual:.0f} kWh/anno")
 
 
-if st.button("Trova coordinate e calcola PVGIS"):
+if st.button("Calcola produzione da indirizzo"):
     lat_found, lon_found = geocode_nominatim(indirizzo_pvgis, on_error=st.warning)
     if lat_found is None:
         st.warning("Coordinate non trovate. Inserisci latitudine e longitudine manualmente e usa il calcolo da coordinate.")
@@ -374,12 +431,13 @@ if st.button("Trova coordinate e calcola PVGIS"):
         st.session_state.lat, st.session_state.lon = lat_found, lon_found
         aggiorna_pvgis(lat_found, lon_found)
 
-lat_col, lon_col = st.columns(2)
-lat = lat_col.number_input("Latitudine", value=float(st.session_state.lat), format="%.6f")
-lon = lon_col.number_input("Longitudine", value=float(st.session_state.lon), format="%.6f")
-st.session_state.lat, st.session_state.lon = lat, lon
-if st.button("Calcola PVGIS con coordinate manuali"):
-    aggiorna_pvgis(lat, lon)
+with st.expander("Coordinate manuali", expanded=mostra_dettagli):
+    lat_col, lon_col = st.columns(2)
+    lat = lat_col.number_input("Latitudine", value=float(st.session_state.lat), format="%.6f")
+    lon = lon_col.number_input("Longitudine", value=float(st.session_state.lon), format="%.6f")
+    st.session_state.lat, st.session_state.lon = lat, lon
+    if st.button("Calcola PVGIS con coordinate manuali"):
+        aggiorna_pvgis(lat, lon)
 
 produzione_default = st.session_state.pvgis_annual or pvgis_estimate_fallback(potenza_kwp, orientamento, inclinazione)
 produzione_annua = st.number_input("Produzione annua usata nel calcolo (kWh)", value=float(round(produzione_default)), step=10.0)
@@ -388,17 +446,18 @@ st.subheader("4. Incentivi e agevolazioni")
 preset = st.selectbox("Preset incentivi", list(PRESET_INCENTIVI.keys()))
 p = PRESET_INCENTIVI[preset]
 
-ic1, ic2, ic3, ic4 = st.columns(4)
-contributo_attivo = ic1.checkbox("Contributo attivo", value=p["contributo_attivo"])
-nome_contributo = ic2.text_input("Nome contributo", value=p["nome_contributo"])
-contributo_pct = ic3.number_input("Contributo %", value=float(p["contributo_pct"]), step=1.0)
-contributo_giorni = ic4.number_input("Incasso contributo (giorni)", value=int(p["contributo_giorni"]), step=10)
-contributo_massimale = st.number_input("Massimale contributo (EUR) - 0 se assente", value=float(p["contributo_massimale"]), step=100.0)
+with st.expander("Dettaglio incentivi", expanded=mostra_dettagli or preset == "Personalizzato"):
+    ic1, ic2, ic3, ic4 = st.columns(4)
+    contributo_attivo = ic1.checkbox("Contributo attivo", value=p["contributo_attivo"])
+    nome_contributo = ic2.text_input("Nome contributo", value=p["nome_contributo"])
+    contributo_pct = ic3.number_input("Contributo %", value=float(p["contributo_pct"]), step=1.0)
+    contributo_giorni = ic4.number_input("Incasso contributo (giorni)", value=int(p["contributo_giorni"]), step=10)
+    contributo_massimale = st.number_input("Massimale contributo (EUR) - 0 se assente", value=float(p["contributo_massimale"]), step=100.0)
 
-dc1, dc2, dc3 = st.columns(3)
-detrazione_attiva = dc1.checkbox("Detrazione attiva", value=p["detrazione_attiva"])
-detrazione_pct = dc2.number_input("Detrazione %", value=float(p["detrazione_pct"]), step=1.0)
-anni_detrazione = dc3.number_input("Numero rate/anni", value=int(p["anni_detrazione"]), step=1)
+    dc1, dc2, dc3 = st.columns(3)
+    detrazione_attiva = dc1.checkbox("Detrazione attiva", value=p["detrazione_attiva"])
+    detrazione_pct = dc2.number_input("Detrazione %", value=float(p["detrazione_pct"]), step=1.0)
+    anni_detrazione = dc3.number_input("Numero rate/anni", value=int(p["anni_detrazione"]), step=1)
 
 st.subheader("5. Parametri economici")
 ec1, ec2, ec3, ec4 = st.columns(4)
@@ -436,12 +495,14 @@ else:
         "Autoconsumo da ipotizzare: non ci sono consumi annui o mensili utilizzabili. "
         "Inserisci il consumo annuo o i consumi mese per mese nella sezione bolletta per farlo calcolare automaticamente."
     )
-rid = ec2.number_input("Ritiro dedicato EUR/kWh", value=DEFAULTS["rid"], step=0.01, format="%.3f")
-aumento_energia_pct = ec3.number_input("Aumento energia annuo %", value=DEFAULTS["aumento_energia_pct"], step=0.5)
-degrado_pct = ec4.number_input("Degrado pannelli annuo %", value=DEFAULTS["degrado_pct"], step=0.05)
-mc1, mc2 = st.columns(2)
-manutenzione = mc1.number_input("Costo manutenzione (EUR)", value=DEFAULTS["manutenzione"], step=50.0)
-frequenza_manutenzione = mc2.number_input("Frequenza manutenzione (anni)", value=DEFAULTS["frequenza_manutenzione"], step=1)
+with st.expander("Ipotesi economiche avanzate", expanded=mostra_dettagli):
+    ac1, ac2, ac3 = st.columns(3)
+    rid = ac1.number_input("Ritiro dedicato EUR/kWh", value=DEFAULTS["rid"], step=0.01, format="%.3f")
+    aumento_energia_pct = ac2.number_input("Aumento energia annuo %", value=DEFAULTS["aumento_energia_pct"], step=0.5)
+    degrado_pct = ac3.number_input("Degrado pannelli annuo %", value=DEFAULTS["degrado_pct"], step=0.05)
+    mc1, mc2 = st.columns(2)
+    manutenzione = mc1.number_input("Costo manutenzione (EUR)", value=DEFAULTS["manutenzione"], step=50.0)
+    frequenza_manutenzione = mc2.number_input("Frequenza manutenzione (anni)", value=DEFAULTS["frequenza_manutenzione"], step=1)
 
 params = {
     "costo_impianto": costo_impianto,
@@ -475,7 +536,20 @@ detrazione_totale = costo_impianto * detrazione_pct / 100 if detrazione_attiva e
 esborso_netto = costo_impianto - contributo
 spesa_annua_stimata = consumi_annui * costo_energia
 
-st.subheader("6. Anteprima economica")
+st.subheader("6. Riepilogo proposta")
+r1, r2, r3, r4 = st.columns(4)
+r1.metric("Impianto", f"{potenza_kwp:.2f} kWp", f"{int(numero_pannelli)} pannelli")
+r2.metric("Accumulo", f"{accumulo_kwh:.0f} kWh" if accumulo_kwh else "No")
+r3.metric("Prezzo IVA compresa", euro(costo_impianto))
+r4.metric("Produzione stimata", kwh(produzione_annua))
+
+rr1, rr2, rr3, rr4 = st.columns(4)
+rr1.metric("Autoconsumo", f"{autoconsumo_pct:.1f}%", kwh(autoconsumo_kwh))
+rr2.metric("Beneficio anno 1", euro(beneficio_annuo))
+rr3.metric("Pareggio", f"Anno {be}" if be else "Oltre analisi")
+rr4.metric("Beneficio 30 anni", euro(beneficio_30))
+
+st.subheader("7. Anteprima economica")
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Beneficio anno 1", euro(beneficio_annuo))
 m2.metric("Pareggio", f"Anno {be}")
@@ -494,7 +568,7 @@ with st.expander("Tabella ritorno economico"):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-st.subheader("7. Genera documenti")
+st.subheader("8. Genera documenti")
 st.info("Vengono generati due documenti: offerta commerciale discorsiva e allegato tecnico con analisi rendimento/ritorno economico.")
 
 data = {
