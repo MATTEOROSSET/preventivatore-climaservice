@@ -1,4 +1,5 @@
 import os
+import re
 
 import streamlit as st
 
@@ -14,7 +15,7 @@ from src.generatore_word import (
     genera_analisi_word,
     genera_preventivo_word,
 )
-from src.odoo_integration import OdooClient, odoo_configured, opportunity_to_prefill
+from src.odoo_integration import OdooClient, odoo_configured, opportunity_to_prefill, sale_order_to_prefill
 from src.pvgis import call_pvgis, geocode_nominatim, pvgis_estimate_fallback, suggest_system
 from src.utility_formattazione import euro, kwh
 
@@ -97,6 +98,189 @@ def get_query_param(name):
     return value or ""
 
 
+def _norm_text(value):
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+def _line_text(line):
+    product = line.get("product_id") or []
+    product_name = product[1] if len(product) > 1 else ""
+    return f"{product_name} {line.get('name') or ''}".strip()
+
+
+def _score_match(text, *values):
+    normalized_text = _norm_text(text)
+    score = 0
+    for value in values:
+        normalized_value = _norm_text(value)
+        if normalized_value and normalized_value in normalized_text:
+            score += len(normalized_value)
+    return score
+
+
+def _first_match_number(text, patterns):
+    for pattern in patterns:
+        match = re.search(pattern, text or "", flags=re.I)
+        if match:
+            return float(match.group(1).replace(",", "."))
+    return 0.0
+
+
+def _product_label(line):
+    if not line:
+        return ""
+    product = line.get("product_id") or []
+    if len(product) > 1 and product[1]:
+        return product[1]
+    return (line.get("name") or "").splitlines()[0].strip()
+
+
+def _infer_panel_from_text(text):
+    code_match = re.search(r"\[(?:\d{1,2})?([A-Za-z]{3,})\s*(\d{3,4})\]", text or "")
+    if code_match:
+        return f"{code_match.group(1).upper()} - {code_match.group(2)} Wp"
+    if text:
+        return text.splitlines()[0][:90]
+    return "Pannelli da preventivo Odoo"
+
+
+def _sale_order_total(order):
+    amount_total = float(order.get("amount_total") or 0)
+    if amount_total:
+        return amount_total, "Totale preventivo Odoo"
+
+    amount_untaxed = float(order.get("amount_untaxed") or 0)
+    amount_tax = float(order.get("amount_tax") or 0)
+    if amount_untaxed or amount_tax:
+        return amount_untaxed + amount_tax, "Imponibile + IVA da Odoo"
+
+    lines = [line for line in order.get("lines", []) if not line.get("display_type")]
+    line_total = sum(float(line.get("price_total") or 0) for line in lines)
+    if line_total:
+        return line_total, "Somma righe preventivo Odoo"
+
+    line_subtotal = sum(float(line.get("price_subtotal") or 0) for line in lines)
+    if line_subtotal:
+        return line_subtotal, "Somma imponibili righe Odoo"
+
+    computed_total = sum(
+        float(line.get("product_uom_qty") or 0) * float(line.get("price_unit") or 0)
+        for line in lines
+    )
+    return computed_total, "Quantita x prezzo unitario Odoo" if computed_total else "Non letto"
+
+
+def _infer_sale_order_data(order, catalogo):
+    lines = order.get("lines") or []
+    commercial_lines = [line for line in lines if not line.get("display_type")]
+    line_texts = [_line_text(line) for line in lines]
+    combined_text = "\n".join(line_texts)
+    panel_words = ("pannell", "modul", "fotovoltaic", "wp", "kwp")
+    battery_words = ("batter", "accumul", "storage", "luna", "huawei")
+
+    best_panel = None
+    best_panel_score = 0
+    for panel in catalogo.get("pannelli", []):
+        score = _score_match(
+            combined_text,
+            panel.get("tipo_pannelli"),
+            panel.get("modello_pannelli"),
+            panel.get("potenza_pannello_wp"),
+        )
+        if score > best_panel_score:
+            best_panel = panel
+            best_panel_score = score
+
+    best_battery = None
+    best_battery_score = 0
+    for battery in list(catalogo.get("batterie", [])) + list(catalogo.get("batterie_da_schede", [])):
+        score = _score_match(
+            combined_text,
+            battery.get("marca_modello"),
+            battery.get("capacita_kwh"),
+        )
+        if score > best_battery_score:
+            best_battery = battery
+            best_battery_score = score
+
+    panel_line = None
+    for line in lines:
+        text = _line_text(line).lower()
+        if any(word in text for word in panel_words):
+            panel_line = line
+            break
+
+    battery_line = None
+    for line in lines:
+        text = _line_text(line).lower()
+        if any(word in text for word in battery_words):
+            battery_line = line
+            break
+
+    number_panels = 0
+    if panel_line:
+        qty = float(panel_line.get("product_uom_qty") or 0)
+        if qty > 1:
+            number_panels = int(round(qty))
+
+    if not number_panels:
+        patterns = [
+            r"(\d{1,2})\s*(?:moduli|modulo|pannelli|pannello)",
+            r"composto\s+da\s+(\d{1,2})",
+            r"\b(\d{1,2})\s*x\s*\d{3,4}\s*w",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, combined_text, flags=re.I)
+            if match:
+                number_panels = int(match.group(1))
+                break
+
+    panel_text = _line_text(panel_line) if panel_line else combined_text
+    battery_text = _line_text(battery_line) if battery_line else combined_text
+    panel_power = float((best_panel or {}).get("potenza_pannello_wp") or 0)
+    if not panel_power:
+        panel_power = _first_match_number(
+            panel_text,
+            [
+                r"(\d{3,4})\s*wp",
+                r"(\d{3,4})\s*w\b",
+                r"potenza\s+pari\s+a\s+(\d{3,4})",
+            ],
+        )
+    battery_capacity = float((best_battery or {}).get("capacita_kwh") or 0)
+    if not battery_capacity:
+        battery_capacity = _first_match_number(
+            battery_text,
+            [
+                r"(\d+(?:[,.]\d+)?)\s*kwh",
+                r"accumulo\s+(?:da\s+)?(\d+(?:[,.]\d+)?)",
+                r"batteria\s+(?:da\s+)?(\d+(?:[,.]\d+)?)",
+            ],
+        )
+
+    panel_description = _line_text(panel_line) if panel_line else ""
+    battery_description = _line_text(battery_line) if battery_line else ""
+    order_total, order_total_source = _sale_order_total(order)
+
+    return {
+        "prezzo": order_total,
+        "prezzo_fonte": order_total_source,
+        "righe_count": len(commercial_lines),
+        "pannello": best_panel if best_panel_score > 0 else None,
+        "batteria": best_battery if best_battery_score > 0 else None,
+        "numero_pannelli": number_panels,
+        "tipo_pannelli": (best_panel or {}).get("tipo_pannelli") or _infer_panel_from_text(_product_label(panel_line) or panel_description),
+        "modello_pannelli": (best_panel or {}).get("modello_pannelli") or "",
+        "potenza_pannello_wp": panel_power or 465.0,
+        "batteria_nome": (best_battery or {}).get("marca_modello") or _product_label(battery_line) or ("Nessuna batteria" if not battery_line else "Batteria da preventivo Odoo"),
+        "accumulo_kwh": battery_capacity,
+        "descrizione_pannelli": panel_description,
+        "descrizione_batteria": battery_description,
+        "riga_pannello": _line_text(panel_line) if panel_line else "",
+        "riga_batteria": _line_text(battery_line) if battery_line else "",
+    }
+
+
 @st.cache_data(show_spinner=False)
 def carica_opportunita_odoo_cached(opportunity_id):
     if not opportunity_id or not odoo_configured():
@@ -104,6 +288,17 @@ def carica_opportunita_odoo_cached(opportunity_id):
     try:
         client = OdooClient()
         return client.read_opportunity(opportunity_id), ""
+    except Exception as exc:
+        return {}, str(exc)
+
+
+@st.cache_data(show_spinner=False)
+def carica_preventivo_odoo_cached(order_id):
+    if not order_id or not odoo_configured():
+        return {}, ""
+    try:
+        client = OdooClient()
+        return client.read_sale_order(order_id), ""
     except Exception as exc:
         return {}, str(exc)
 
@@ -168,13 +363,15 @@ with header_col_title:
     st.title("Preventivatore Fotovoltaico Climaservice")
     st.caption("Calcolo rendimento, proposta economica e documenti commerciali")
 
+early_order_id = get_query_param("order_id") or get_query_param("sale_order_id")
+
 if st.button("Nuovo preventivo / cancella dati caricati"):
     for key in list(st.session_state.keys()):
         if key != "logged":
             del st.session_state[key]
     st.rerun()
 
-if st.button("Aggiorna listini e schede tecniche"):
+if not early_order_id and st.button("Aggiorna listini e schede tecniche"):
     carica_catalogo_cached.clear()
     st.success("Listini e schede tecniche riletti.")
     st.rerun()
@@ -192,22 +389,39 @@ st.caption(
 )
 
 opportunity_id = get_query_param("opportunity_id") or get_query_param("lead_id")
+order_id = early_order_id
 odoo_opportunity = {}
+odoo_order = {}
 odoo_prefill = {}
+odoo_order_data = {}
+
+col1, col2 = st.columns([1, 1])
+catalogo = carica_catalogo_cached(os.path.dirname(__file__), firma_catalogo(os.path.dirname(__file__)))
+
+if order_id:
+    odoo_order, odoo_order_error = carica_preventivo_odoo_cached(order_id)
+    if odoo_order:
+        order_prefill = sale_order_to_prefill(odoo_order)
+        odoo_prefill.update({key: value for key, value in order_prefill.items() if value})
+        odoo_order_data = _infer_sale_order_data(odoo_order, catalogo)
+        st.success(f"Preventivo Odoo collegato: {order_prefill.get('preventivo') or order_id}")
+    elif odoo_configured():
+        st.warning(f"Preventivo Odoo indicato nel link ({order_id}), ma non letto: {odoo_order_error}")
+    else:
+        st.info(f"Preventivo Odoo indicato nel link ({order_id}). Configura i Secrets Odoo per precompilare i dati.")
+
 if opportunity_id:
     odoo_opportunity, odoo_error = carica_opportunita_odoo_cached(opportunity_id)
-    odoo_prefill = opportunity_to_prefill(odoo_opportunity) if odoo_opportunity else {}
-    if odoo_prefill:
-        st.success(f"Opportunita Odoo collegata: {odoo_prefill.get('opportunita') or opportunity_id}")
+    opportunity_prefill = opportunity_to_prefill(odoo_opportunity) if odoo_opportunity else {}
+    odoo_prefill.update({key: value for key, value in opportunity_prefill.items() if value and not odoo_prefill.get(key)})
+    if opportunity_prefill:
+        st.success(f"Opportunita Odoo collegata: {opportunity_prefill.get('opportunita') or opportunity_id}")
     elif odoo_configured():
         st.warning(f"Opportunita Odoo indicata nel link ({opportunity_id}), ma non letta: {odoo_error}")
     else:
         st.info(f"Opportunita Odoo indicata nel link ({opportunity_id}). Configura i Secrets Odoo per precompilare i dati.")
 elif mostra_dettagli:
     st.caption("Odoo non collegato in questa sessione. In futuro il link potra' includere ?opportunity_id=ID_OPPORTUNITA.")
-
-col1, col2 = st.columns([1, 1])
-catalogo = carica_catalogo_cached(os.path.dirname(__file__), firma_catalogo(os.path.dirname(__file__)))
 
 with col1:
     st.subheader("1. Bolletta")
@@ -348,88 +562,147 @@ with col1:
         st.info(f"Consumo annuo di calcolo ricavato dalla somma dei 12 mesi: {kwh(consumi_annui)}")
 
 with col2:
-    st.subheader("2. Consiglio impianto")
-    obiettivo = st.selectbox(
-        "Obiettivo cliente",
-        ["Ridurre bolletta", "Massimizzare rendimento", "Massimizzare indipendenza energetica", "Auto elettrica futura", "Pompa di calore futura"],
-    )
-    suggested_kwp, suggested_batt = suggest_system(consumi_annui, obiettivo)
-    st.info(f"Taglia consigliata: {suggested_kwp} kWp + batteria {suggested_batt} kWh")
-
+    st.subheader("2. Impianto")
     pannelli_catalogo = list(catalogo.get("pannelli", []))
     configurazioni_listino = list(catalogo["moduli"])
     batterie_listino = list(catalogo["batterie"]) + list(catalogo.get("batterie_da_schede", []))
-    batteria_scelta = prodotto_piu_vicino(batterie_listino, suggested_batt, "capacita_kwh")
 
-    if pannelli_catalogo:
-        labels_pannelli = [
-            f"{item['tipo_pannelli']} - {item['potenza_pannello_wp']:.0f} Wp"
-            f"{' - da scheda tecnica' if item.get('solo_scheda') else ''}"
-            for item in pannelli_catalogo
-        ]
-        pannello_default = pannelli_catalogo[0]
-        selected_panel_idx = st.selectbox(
-            "Tipo pannello",
-            range(len(pannelli_catalogo)),
-            index=0,
-            format_func=lambda idx: labels_pannelli[idx],
+    if order_id and odoo_order:
+        st.info("Dati impianto letti dal preventivo Odoo. Controlla solo i campi tecnici mancanti o non riconosciuti.")
+        pannello_scelto = odoo_order_data.get("pannello") or {}
+        batteria_scelta = odoo_order_data.get("batteria")
+
+        tipo_pannelli = st.text_input("Tipo pannelli", odoo_order_data.get("tipo_pannelli") or "Pannelli da preventivo Odoo")
+        modello_pannelli = st.text_input("Modello pannelli", odoo_order_data.get("modello_pannelli") or "")
+        potenza_pannello_wp = st.number_input(
+            "Potenza singolo pannello (Wp)",
+            value=float(odoo_order_data.get("potenza_pannello_wp") or 465.0),
+            step=5.0,
         )
-        pannello_scelto = pannelli_catalogo[selected_panel_idx]
-    else:
-        st.warning("Nessun pannello trovato da listini o schede tecniche. Inserisci i dati impianto manualmente.")
-        pannello_scelto = {}
-
-    if batterie_listino:
-        labels_batterie = ["Nessuna batteria"] + [
-            (
-                f"{item['marca_modello']} - {item['capacita_kwh']:.1f} kWh - "
-                f"{'prezzo manuale' if item.get('solo_scheda') else euro(item['prezzo_nuovo'])}"
-            )
-            for item in batterie_listino
-        ]
-        default_batt_idx = batterie_listino.index(batteria_scelta) + 1 if batteria_scelta in batterie_listino else 0
-        selected_batt_idx = st.selectbox(
-            "Batteria",
-            range(len(labels_batterie)),
-            index=default_batt_idx,
-            format_func=lambda idx: labels_batterie[idx],
+        numero_pannelli = st.number_input(
+            "Numero pannelli",
+            value=max(1, int(odoo_order_data.get("numero_pannelli") or 1)),
+            step=1,
         )
-        batteria_scelta = batterie_listino[selected_batt_idx - 1] if selected_batt_idx > 0 else None
-    else:
-        batteria_scelta = None
-
-    with st.expander("Dettagli tecnici pannello e inverter", expanded=mostra_dettagli):
-        tipo_pannelli = st.text_input("Tipo pannelli", pannello_scelto.get("tipo_pannelli", "TRINA SOLAR"))
-        modello_pannelli = st.text_input("Modello pannelli", pannello_scelto.get("modello_pannelli", "TSM-NEG9R.28"))
-        potenza_pannello_wp = st.number_input("Potenza singolo pannello (Wp)", value=float(pannello_scelto.get("potenza_pannello_wp") or 465.0), step=5.0)
-    numero_pannelli_default = max(1, int(round(suggested_kwp * 1000 / max(potenza_pannello_wp, 1))))
-    numero_pannelli = st.number_input("Numero pannelli", value=numero_pannelli_default, step=1)
-    potenza_kwp_calcolata = round(float(numero_pannelli) * float(potenza_pannello_wp) / 1000, 2)
-    st.metric("Potenza impianto", f"{potenza_kwp_calcolata:.2f} kWp")
-    potenza_kwp = potenza_kwp_calcolata
-    configurazione_scelta = configurazione_da_pannello(configurazioni_listino, pannello_scelto, numero_pannelli)
-    if not configurazione_scelta:
-        configurazione_scelta = {**pannello_scelto, "numero_pannelli": int(numero_pannelli), "potenza_kwp": potenza_kwp, "prezzo_iva": 0}
-    moduli = f"{numero_pannelli} x {potenza_pannello_wp:.0f} W"
-    with st.expander("Modifica potenza o inverter", expanded=mostra_dettagli):
+        potenza_kwp_calcolata = round(float(numero_pannelli) * float(potenza_pannello_wp) / 1000, 2)
+        st.metric("Potenza impianto", f"{potenza_kwp_calcolata:.2f} kWp")
         potenza_kwp = st.number_input("Potenza impianto proposta (kWp)", value=float(potenza_kwp_calcolata), step=0.01)
-        inverter = st.text_input("Inverter", configurazione_scelta.get("inverter") or pannello_scelto.get("inverter", "SAJ"))
-    batteria_default = batteria_scelta.get("marca_modello") if batteria_scelta else "Nessuna batteria"
-    batteria = st.text_input("Batteria", batteria_default)
-    accumulo_kwh = st.number_input("Accumulo (kWh)", value=float((batteria_scelta or {}).get("capacita_kwh") or 0), step=1.0)
-    prezzo_listino = prezzo_suggerito(configurazione_scelta, batteria_scelta)
-    prezzo_help = "Prezzo suggerito da listino in base a tipo pannello, numero pannelli e accumulo" if prezzo_listino else "Prezzo da inserire manualmente: combinazione non trovata nel listino"
-    costo_impianto = st.number_input("Costo impianto IVA compresa (EUR)", value=float(prezzo_listino or 13900.0), step=100.0, help=prezzo_help)
-    with st.expander("Dettaglio prezzo e schede tecniche"):
-        st.write(f"Prezzo moduli/inverter da listino: {euro(configurazione_scelta.get('prezzo_iva') or 0)}")
-        st.write(f"Prezzo accumulo da listino: {euro((batteria_scelta or {}).get('prezzo_nuovo') or 0)}")
-        if configurazione_scelta.get("solo_scheda") or (batteria_scelta or {}).get("solo_scheda") or not configurazione_scelta.get("prezzo_iva"):
-            st.warning("Uno o piu' prodotti arrivano solo da scheda tecnica o non hanno una riga prezzo esatta: il prezzo va inserito o verificato manualmente.")
-        st.write(f"Fonte listino: {configurazione_scelta.get('fonte_listino') or 'Non rilevata'}")
-        if configurazione_scelta.get("scheda_tecnica"):
-            st.write(f"Scheda pannelli: {configurazione_scelta['scheda_tecnica']}")
-        if (batteria_scelta or {}).get("scheda_tecnica"):
-            st.write(f"Scheda batteria: {batteria_scelta['scheda_tecnica']}")
+
+        batteria = st.text_input("Batteria", odoo_order_data.get("batteria_nome") or "Nessuna batteria")
+        accumulo_kwh = st.number_input("Accumulo (kWh)", value=float(odoo_order_data.get("accumulo_kwh") or 0), step=1.0)
+        inverter = "Da preventivo Odoo"
+        prezzo_odoo = float(odoo_order_data.get("prezzo") or 0)
+        costo_impianto = st.number_input(
+            "Costo impianto IVA compresa (EUR)",
+            value=float(prezzo_odoo or 0),
+            step=100.0,
+            help="Prezzo totale letto dal preventivo Odoo",
+        )
+        configurazione_scelta = {
+            **pannello_scelto,
+            "tipo_pannelli": tipo_pannelli,
+            "modello_pannelli": modello_pannelli,
+            "potenza_pannello_wp": potenza_pannello_wp,
+            "numero_pannelli": int(numero_pannelli),
+            "potenza_kwp": potenza_kwp,
+            "prezzo_iva": prezzo_odoo,
+            "descrizione_tecnica": odoo_order_data.get("descrizione_pannelli") or (pannello_scelto or {}).get("descrizione_tecnica", ""),
+            "fonte_listino": "Preventivo Odoo",
+        }
+        if batteria_scelta:
+            batteria_scelta = {
+                **batteria_scelta,
+                "marca_modello": batteria,
+                "capacita_kwh": accumulo_kwh,
+                "descrizione_tecnica": odoo_order_data.get("descrizione_batteria") or batteria_scelta.get("descrizione_tecnica", ""),
+            }
+        elif accumulo_kwh > 0 or batteria.lower() != "nessuna batteria":
+            batteria_scelta = {
+                "marca_modello": batteria,
+                "capacita_kwh": accumulo_kwh,
+                "descrizione_tecnica": odoo_order_data.get("descrizione_batteria", ""),
+            }
+        moduli = f"{numero_pannelli} x {potenza_pannello_wp:.0f} W"
+
+        with st.expander("Righe lette dal preventivo Odoo", expanded=mostra_dettagli):
+            st.write(f"Prezzo preventivo Odoo: {euro(prezzo_odoo)}")
+            st.write(f"Fonte prezzo: {odoo_order_data.get('prezzo_fonte') or 'Non letta'}")
+            st.write(f"Righe commerciali lette: {odoo_order_data.get('righe_count', 0)}")
+            st.write(f"Riga pannelli: {odoo_order_data.get('riga_pannello') or 'Non riconosciuta'}")
+            st.write(f"Riga batteria: {odoo_order_data.get('riga_batteria') or 'Non presente / non riconosciuta'}")
+            if not prezzo_odoo:
+                st.warning("Prezzo non letto da Odoo: verifica che l'azione apra il link con order_id e che l'utente API possa leggere importi e righe del preventivo.")
+    else:
+        st.caption("Preventivo Odoo non collegato: uso il catalogo locale solo come supporto manuale.")
+        obiettivo = st.selectbox(
+            "Obiettivo cliente",
+            ["Ridurre bolletta", "Massimizzare rendimento", "Massimizzare indipendenza energetica", "Auto elettrica futura", "Pompa di calore futura"],
+        )
+        suggested_kwp, suggested_batt = suggest_system(consumi_annui, obiettivo)
+        st.info(f"Taglia consigliata: {suggested_kwp} kWp + batteria {suggested_batt} kWh")
+        batteria_scelta = prodotto_piu_vicino(batterie_listino, suggested_batt, "capacita_kwh")
+
+        if pannelli_catalogo:
+            labels_pannelli = [
+                f"{item['tipo_pannelli']} - {item['potenza_pannello_wp']:.0f} Wp"
+                f"{' - da scheda tecnica' if item.get('solo_scheda') else ''}"
+                for item in pannelli_catalogo
+            ]
+            selected_panel_idx = st.selectbox(
+                "Tipo pannello",
+                range(len(pannelli_catalogo)),
+                index=0,
+                format_func=lambda idx: labels_pannelli[idx],
+            )
+            pannello_scelto = pannelli_catalogo[selected_panel_idx]
+        else:
+            st.warning("Nessun pannello trovato da listini o schede tecniche. Inserisci i dati impianto manualmente.")
+            pannello_scelto = {}
+
+        if batterie_listino:
+            labels_batterie = ["Nessuna batteria"] + [
+                (
+                    f"{item['marca_modello']} - {item['capacita_kwh']:.1f} kWh - "
+                    f"{'prezzo manuale' if item.get('solo_scheda') else euro(item['prezzo_nuovo'])}"
+                )
+                for item in batterie_listino
+            ]
+            default_batt_idx = batterie_listino.index(batteria_scelta) + 1 if batteria_scelta in batterie_listino else 0
+            selected_batt_idx = st.selectbox(
+                "Batteria",
+                range(len(labels_batterie)),
+                index=default_batt_idx,
+                format_func=lambda idx: labels_batterie[idx],
+            )
+            batteria_scelta = batterie_listino[selected_batt_idx - 1] if selected_batt_idx > 0 else None
+        else:
+            batteria_scelta = None
+
+        with st.expander("Dettagli tecnici pannello e inverter", expanded=mostra_dettagli):
+            tipo_pannelli = st.text_input("Tipo pannelli", pannello_scelto.get("tipo_pannelli", "TRINA SOLAR"))
+            modello_pannelli = st.text_input("Modello pannelli", pannello_scelto.get("modello_pannelli", "TSM-NEG9R.28"))
+            potenza_pannello_wp = st.number_input("Potenza singolo pannello (Wp)", value=float(pannello_scelto.get("potenza_pannello_wp") or 465.0), step=5.0)
+        numero_pannelli_default = max(1, int(round(suggested_kwp * 1000 / max(potenza_pannello_wp, 1))))
+        numero_pannelli = st.number_input("Numero pannelli", value=numero_pannelli_default, step=1)
+        potenza_kwp_calcolata = round(float(numero_pannelli) * float(potenza_pannello_wp) / 1000, 2)
+        st.metric("Potenza impianto", f"{potenza_kwp_calcolata:.2f} kWp")
+        potenza_kwp = potenza_kwp_calcolata
+        configurazione_scelta = configurazione_da_pannello(configurazioni_listino, pannello_scelto, numero_pannelli)
+        if not configurazione_scelta:
+            configurazione_scelta = {**pannello_scelto, "numero_pannelli": int(numero_pannelli), "potenza_kwp": potenza_kwp, "prezzo_iva": 0}
+        moduli = f"{numero_pannelli} x {potenza_pannello_wp:.0f} W"
+        with st.expander("Modifica potenza o inverter", expanded=mostra_dettagli):
+            potenza_kwp = st.number_input("Potenza impianto proposta (kWp)", value=float(potenza_kwp_calcolata), step=0.01)
+            inverter = st.text_input("Inverter", configurazione_scelta.get("inverter") or pannello_scelto.get("inverter", "SAJ"))
+        batteria_default = batteria_scelta.get("marca_modello") if batteria_scelta else "Nessuna batteria"
+        batteria = st.text_input("Batteria", batteria_default)
+        accumulo_kwh = st.number_input("Accumulo (kWh)", value=float((batteria_scelta or {}).get("capacita_kwh") or 0), step=1.0)
+        prezzo_listino = prezzo_suggerito(configurazione_scelta, batteria_scelta)
+        prezzo_help = "Prezzo suggerito da catalogo locale" if prezzo_listino else "Prezzo da inserire manualmente"
+        costo_impianto = st.number_input("Costo impianto IVA compresa (EUR)", value=float(prezzo_listino or 13900.0), step=100.0, help=prezzo_help)
+        with st.expander("Dettaglio catalogo locale", expanded=mostra_dettagli):
+            st.write(f"Prezzo moduli/inverter da catalogo: {euro(configurazione_scelta.get('prezzo_iva') or 0)}")
+            st.write(f"Prezzo accumulo da catalogo: {euro((batteria_scelta or {}).get('prezzo_nuovo') or 0)}")
 
 st.subheader("3. Localizzazione e PVGIS reale")
 indirizzo_pvgis = st.text_input("Indirizzo impianto", f"{indirizzo}, {localita}, Italia")
@@ -715,20 +988,24 @@ with dl4:
     else:
         st.caption("Il PDF viene esportato dal file Word commerciale, mantenendo lo stesso layout.")
 
-if opportunity_id:
+odoo_target_model = "sale.order" if order_id else ("crm.lead" if opportunity_id else "")
+odoo_target_id = order_id or opportunity_id
+odoo_target_label = "preventivo Odoo" if order_id else "opportunita Odoo"
+
+if odoo_target_id:
     st.markdown("**Collegamento Odoo**")
     if not odoo_configured():
-        st.info("Per salvare i documenti nell'opportunita Odoo bisogna configurare i Secrets Odoo in Streamlit Cloud.")
+        st.info(f"Per salvare i documenti nel {odoo_target_label} bisogna configurare i Secrets Odoo in Streamlit Cloud.")
     else:
         if st.button("Salva documenti e riepilogo su Odoo"):
             try:
-                with st.spinner("Salvo documenti nell'opportunita Odoo..."):
+                with st.spinner(f"Salvo documenti nel {odoo_target_label}..."):
                     client = OdooClient()
                     attachment_ids = []
                     attachment_ids.append(
                         client.create_attachment(
-                            res_model="crm.lead",
-                            res_id=opportunity_id,
+                            res_model=odoo_target_model,
+                            res_id=odoo_target_id,
                             filename=f"Offerta_Commerciale_Fotovoltaico_{base_filename}.docx",
                             content=docx.getvalue(),
                             mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -736,8 +1013,8 @@ if opportunity_id:
                     )
                     attachment_ids.append(
                         client.create_attachment(
-                            res_model="crm.lead",
-                            res_id=opportunity_id,
+                            res_model=odoo_target_model,
+                            res_id=odoo_target_id,
                             filename=f"Analisi_Rendimento_Fotovoltaico_{base_filename}.pdf",
                             content=analisi_pdf,
                             mimetype="application/pdf",
@@ -745,8 +1022,8 @@ if opportunity_id:
                     )
                     attachment_ids.append(
                         client.create_attachment(
-                            res_model="crm.lead",
-                            res_id=opportunity_id,
+                            res_model=odoo_target_model,
+                            res_id=odoo_target_id,
                             filename=f"Analisi_Rendimento_Fotovoltaico_{base_filename}.docx",
                             content=analisi_docx.getvalue(),
                             mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -764,7 +1041,7 @@ if opportunity_id:
                         f"<li>Pareggio: {'Anno ' + str(be) if be else 'oltre il periodo di analisi'}</li>"
                         f"</ul>"
                     )
-                    client.post_message(opportunity_id, riepilogo_odoo, attachment_ids=attachment_ids)
-                st.success("Documenti e riepilogo salvati nell'opportunita Odoo.")
+                    client.post_message_on_record(odoo_target_model, odoo_target_id, riepilogo_odoo, attachment_ids=attachment_ids)
+                st.success(f"Documenti e riepilogo salvati nel {odoo_target_label}.")
             except Exception as exc:
                 st.error(f"Salvataggio su Odoo non riuscito: {exc}")
