@@ -91,6 +91,54 @@ class OdooClient:
         )
         return records[0] if records else {}
 
+    def read_sale_order(self, order_id):
+        records = self.execute(
+            "sale.order",
+            "read",
+            [[int(order_id)]],
+            {
+                "fields": [
+                    "id",
+                    "name",
+                    "partner_id",
+                    "opportunity_id",
+                    "amount_total",
+                    "order_line",
+                ]
+            },
+        )
+        if not records:
+            return {}
+
+        order = records[0]
+        partner_ref = order.get("partner_id")
+        if partner_ref:
+            order["partner"] = self.read_partner(partner_ref[0])
+
+        line_ids = order.get("order_line") or []
+        if line_ids:
+            order["lines"] = self.read_sale_order_lines(line_ids)
+        else:
+            order["lines"] = []
+        return order
+
+    def read_sale_order_lines(self, line_ids):
+        return self.execute(
+            "sale.order.line",
+            "read",
+            [[int(line_id) for line_id in line_ids]],
+            {
+                "fields": [
+                    "id",
+                    "name",
+                    "product_id",
+                    "product_uom_qty",
+                    "price_unit",
+                    "price_total",
+                ]
+            },
+        )
+
     def create_attachment(self, *, res_model, res_id, filename, content, mimetype):
         attachment_id = self.execute(
             "ir.attachment",
@@ -108,11 +156,11 @@ class OdooClient:
         )
         return attachment_id
 
-    def post_message(self, opportunity_id, body, attachment_ids=None):
+    def post_message_on_record(self, res_model, res_id, body, attachment_ids=None):
         return self.execute(
-            "crm.lead",
+            res_model,
             "message_post",
-            [[int(opportunity_id)]],
+            [[int(res_id)]],
             {
                 "body": body,
                 "attachment_ids": attachment_ids or [],
@@ -120,6 +168,9 @@ class OdooClient:
                 "subtype_xmlid": "mail.mt_note",
             },
         )
+
+    def post_message(self, opportunity_id, body, attachment_ids=None):
+        return self.post_message_on_record("crm.lead", opportunity_id, body, attachment_ids)
 
 
 def opportunity_to_prefill(opportunity):
@@ -135,4 +186,21 @@ def opportunity_to_prefill(opportunity):
         "email": partner.get("email") or opportunity.get("email_from") or "",
         "telefono": partner.get("phone") or opportunity.get("phone") or "",
         "opportunita": opportunity.get("name") or "",
+    }
+
+
+def sale_order_to_prefill(order):
+    partner = order.get("partner") or {}
+    city_parts = [partner.get("zip") or "", partner.get("city") or ""]
+    city = " ".join(part for part in city_parts if part).strip()
+    opportunity_ref = order.get("opportunity_id") or []
+    return {
+        "cliente": partner.get("name") or "",
+        "indirizzo": partner.get("street") or "",
+        "localita": city,
+        "email": partner.get("email") or "",
+        "telefono": partner.get("phone") or "",
+        "preventivo": order.get("name") or "",
+        "opportunity_id": opportunity_ref[0] if opportunity_ref else "",
+        "opportunita": opportunity_ref[1] if len(opportunity_ref) > 1 else "",
     }
