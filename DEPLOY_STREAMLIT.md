@@ -52,10 +52,30 @@ ODOO_USERNAME = "utente.tecnico@azienda.it"
 ODOO_API_KEY = "api_key_odoo"
 ```
 
-Il link da Odoo verso il preventivatore deve includere l'ID opportunita:
+Il link da Odoo verso il preventivatore puo' includere l'ID opportunita:
 
 ```text
 https://preventivatore-climaservice.streamlit.app/?opportunity_id=ID_OPPORTUNITA
 ```
 
-Quando le credenziali sono configurate, l'app legge i dati dell'opportunita CRM e puo' salvare nell'opportunita i documenti generati e un riepilogo economico.
+Dal preventivo Odoo e' meglio passare l'ID dell'ordine di vendita:
+
+```text
+https://preventivatore-climaservice.streamlit.app/?order_id=ID_PREVENTIVO
+```
+
+Codice consigliato per l'azione contestuale sul modello `Ordine di vendita` / `sale.order`:
+
+```python
+url = "https://preventivatore-climaservice.streamlit.app/?order_id=%s" % record.id
+
+action = {
+    "type": "ir.actions.act_url",
+    "url": url,
+    "target": "new",
+}
+```
+
+Quando le credenziali sono configurate, l'app legge i dati del preventivo Odoo. Usa totale, pannelli, numero pannelli e batteria come valori iniziali; l'inverter resta gestito dal preventivatore. L'app salva nel preventivo Odoo i documenti generati e un riepilogo economico. L'opportunita CRM non e' obbligatoria.
+
+Nel flusso Odoo-first, listini e schede tecniche locali sono solo un fallback per uso manuale. La fonte commerciale ufficiale e' il preventivo Odoo.

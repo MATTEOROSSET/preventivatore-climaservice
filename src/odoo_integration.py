@@ -103,6 +103,8 @@ class OdooClient:
                     "partner_id",
                     "opportunity_id",
                     "amount_total",
+                    "amount_untaxed",
+                    "amount_tax",
                     "order_line",
                 ]
             },
@@ -134,7 +136,9 @@ class OdooClient:
                     "product_id",
                     "product_uom_qty",
                     "price_unit",
+                    "price_subtotal",
                     "price_total",
+                    "display_type",
                 ]
             },
         )

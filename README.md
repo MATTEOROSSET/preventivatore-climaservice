@@ -32,21 +32,26 @@ Il modello Word usato per generare il preventivo si trova in:
 
 templates/PR_fotovoltaico Trina SAJ.docx
 
-## Listini e schede tecniche
+## Fonte dati impianto
 
-I listini PDF vanno messi nella cartella:
+Il flusso consigliato e' Odoo-first: il commerciale parte dal preventivo Odoo e apre il preventivatore dal pulsante/azione contestuale.
 
-listini/
+In questa modalita l'app legge direttamente dal preventivo Odoo:
 
-Le schede tecniche PDF vanno messe nella cartella:
+- cliente e indirizzo
+- prezzo totale
+- righe prodotto
+- tipo pannelli
+- numero pannelli
+- batteria
 
-schede_tecniche/
+Il preventivatore usa questi dati come base e chiede solo di controllare i dati tecnici necessari ai calcoli, come potenza del singolo pannello e capacita' batteria.
 
-Quando cambi o aggiungi un PDF in queste cartelle, il preventivatore rilegge i dati e aggiorna prezzi, configurazioni e descrizioni tecniche usate nella proposta Word.
+## Catalogo locale di fallback
 
-Il flusso di scelta impianto parte dal pannello: scegli il tipo di pannello, imposti il numero di pannelli e il preventivatore calcola la potenza dell'impianto. Il listino viene usato per proporre il prezzo solo quando trova quella combinazione esatta di pannello e numero moduli.
+Le cartelle `listini/` e `schede_tecniche/` restano solo come supporto manuale se l'app viene aperta senza un preventivo Odoo collegato.
 
-Se una scheda tecnica non ha ancora una riga corrispondente nel listino, il prodotto compare comunque come voce "da scheda tecnica" nel menu. In quel caso il preventivatore compila marca, modello, potenza e descrizione tecnica, ma il prezzo resta da inserire/verificare manualmente.
+Nel flusso normale dei commerciali non sono la fonte principale: prezzi e prodotti devono essere governati da Odoo.
 
 ## Lettura bollette
 
@@ -62,7 +67,15 @@ Il preventivatore puo' essere aperto da un'opportunita Odoo aggiungendo al link:
 ?opportunity_id=ID_OPPORTUNITA
 ```
 
-Se i Secrets Odoo sono configurati su Streamlit Cloud, l'app legge cliente e indirizzo dall'opportunita e permette di salvare in Odoo i documenti generati.
+Dal preventivo Odoo e' preferibile passare l'ID del preventivo:
+
+```text
+?order_id=ID_PREVENTIVO
+```
+
+Se i Secrets Odoo sono configurati su Streamlit Cloud, l'app legge cliente, indirizzo, totale del preventivo Odoo, tipo pannelli, numero pannelli e batteria dalle righe del preventivo e li usa come valori iniziali del calcolo. L'inverter non viene preso da Odoo perche' nel flusso Climaservice la distinzione commerciale principale e' pannelli + batterie.
+
+I documenti generati e il riepilogo vengono salvati direttamente nel preventivo Odoo (`sale.order`). L'opportunita CRM non e' obbligatoria.
 
 ## Se non riparte
 
