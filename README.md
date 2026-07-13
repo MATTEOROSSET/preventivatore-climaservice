@@ -54,6 +54,16 @@ Il caricatore accetta PDF, JPG e PNG.
 I PDF testuali vengono letti direttamente; immagini e PDF scannerizzati richiedono OCR con Tesseract.
 In cloud Tesseract viene installato tramite packages.txt.
 
+## Integrazione Odoo CRM
+
+Il preventivatore puo' essere aperto da un'opportunita Odoo aggiungendo al link:
+
+```text
+?opportunity_id=ID_OPPORTUNITA
+```
+
+Se i Secrets Odoo sono configurati su Streamlit Cloud, l'app legge cliente e indirizzo dall'opportunita e permette di salvare in Odoo i documenti generati.
+
 ## Se non riparte
 
 Fai doppio clic su:

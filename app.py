@@ -14,6 +14,7 @@ from src.generatore_word import (
     genera_analisi_word,
     genera_preventivo_word,
 )
+from src.odoo_integration import OdooClient, odoo_configured, opportunity_to_prefill
 from src.pvgis import call_pvgis, geocode_nominatim, pvgis_estimate_fallback, suggest_system
 from src.utility_formattazione import euro, kwh
 
@@ -84,6 +85,27 @@ def firma_catalogo(app_dir):
                 stat = os.stat(path)
                 items.append((path, stat.st_size, stat.st_mtime_ns))
     return tuple(sorted(items))
+
+
+def get_query_param(name):
+    try:
+        value = st.query_params.get(name)
+    except Exception:
+        value = None
+    if isinstance(value, list):
+        return value[0] if value else ""
+    return value or ""
+
+
+@st.cache_data(show_spinner=False)
+def carica_opportunita_odoo_cached(opportunity_id):
+    if not opportunity_id or not odoo_configured():
+        return {}, ""
+    try:
+        client = OdooClient()
+        return client.read_opportunity(opportunity_id), ""
+    except Exception as exc:
+        return {}, str(exc)
 
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -169,6 +191,21 @@ st.caption(
     "Dettagliato: apre anche verifiche, mensili, parametri tecnici e ipotesi economiche."
 )
 
+opportunity_id = get_query_param("opportunity_id") or get_query_param("lead_id")
+odoo_opportunity = {}
+odoo_prefill = {}
+if opportunity_id:
+    odoo_opportunity, odoo_error = carica_opportunita_odoo_cached(opportunity_id)
+    odoo_prefill = opportunity_to_prefill(odoo_opportunity) if odoo_opportunity else {}
+    if odoo_prefill:
+        st.success(f"Opportunita Odoo collegata: {odoo_prefill.get('opportunita') or opportunity_id}")
+    elif odoo_configured():
+        st.warning(f"Opportunita Odoo indicata nel link ({opportunity_id}), ma non letta: {odoo_error}")
+    else:
+        st.info(f"Opportunita Odoo indicata nel link ({opportunity_id}). Configura i Secrets Odoo per precompilare i dati.")
+elif mostra_dettagli:
+    st.caption("Odoo non collegato in questa sessione. In futuro il link potra' includere ?opportunity_id=ID_OPPORTUNITA.")
+
 col1, col2 = st.columns([1, 1])
 catalogo = carica_catalogo_cached(os.path.dirname(__file__), firma_catalogo(os.path.dirname(__file__)))
 
@@ -225,9 +262,9 @@ with col1:
             else:
                 st.warning("Non ho trovato un dettaglio affidabile dei consumi mese per mese. Il grafico confrontera' la produzione mensile con una media mensile ottenuta dal consumo annuo.")
 
-    cliente = st.text_input("Cliente", bill.get("cliente", ""))
-    indirizzo = st.text_input("Indirizzo", bill.get("indirizzo", ""))
-    localita = st.text_input("Localita", bill.get("localita", ""))
+    cliente = st.text_input("Cliente", odoo_prefill.get("cliente") or bill.get("cliente", ""))
+    indirizzo = st.text_input("Indirizzo", odoo_prefill.get("indirizzo") or bill.get("indirizzo", ""))
+    localita = st.text_input("Localita", odoo_prefill.get("localita") or bill.get("localita", ""))
     pod = st.text_input("POD", bill.get("pod", ""))
     potenza_impegnata = st.number_input("Potenza impegnata (kW)", value=float(bill.get("potenza_impegnata") or 3.0), step=0.5)
     consumo_mese_default = float(bill.get("consumo_mese_kwh") or 0)
@@ -677,3 +714,57 @@ with dl4:
         )
     else:
         st.caption("Il PDF viene esportato dal file Word commerciale, mantenendo lo stesso layout.")
+
+if opportunity_id:
+    st.markdown("**Collegamento Odoo**")
+    if not odoo_configured():
+        st.info("Per salvare i documenti nell'opportunita Odoo bisogna configurare i Secrets Odoo in Streamlit Cloud.")
+    else:
+        if st.button("Salva documenti e riepilogo su Odoo"):
+            try:
+                with st.spinner("Salvo documenti nell'opportunita Odoo..."):
+                    client = OdooClient()
+                    attachment_ids = []
+                    attachment_ids.append(
+                        client.create_attachment(
+                            res_model="crm.lead",
+                            res_id=opportunity_id,
+                            filename=f"Offerta_Commerciale_Fotovoltaico_{base_filename}.docx",
+                            content=docx.getvalue(),
+                            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        )
+                    )
+                    attachment_ids.append(
+                        client.create_attachment(
+                            res_model="crm.lead",
+                            res_id=opportunity_id,
+                            filename=f"Analisi_Rendimento_Fotovoltaico_{base_filename}.pdf",
+                            content=analisi_pdf,
+                            mimetype="application/pdf",
+                        )
+                    )
+                    attachment_ids.append(
+                        client.create_attachment(
+                            res_model="crm.lead",
+                            res_id=opportunity_id,
+                            filename=f"Analisi_Rendimento_Fotovoltaico_{base_filename}.docx",
+                            content=analisi_docx.getvalue(),
+                            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        )
+                    )
+                    riepilogo_odoo = (
+                        "<p><b>Preventivo fotovoltaico generato da Climaservice</b></p>"
+                        f"<ul>"
+                        f"<li>Impianto: {potenza_kwp:.2f} kWp - {int(numero_pannelli)} pannelli</li>"
+                        f"<li>Accumulo: {accumulo_kwh:.0f} kWh</li>"
+                        f"<li>Prezzo IVA compresa: {euro(costo_impianto)}</li>"
+                        f"<li>Produzione stimata: {kwh(produzione_annua)}</li>"
+                        f"<li>Autoconsumo stimato: {autoconsumo_pct:.1f}% ({kwh(autoconsumo_kwh)})</li>"
+                        f"<li>Beneficio anno 1: {euro(beneficio_annuo)}</li>"
+                        f"<li>Pareggio: {'Anno ' + str(be) if be else 'oltre il periodo di analisi'}</li>"
+                        f"</ul>"
+                    )
+                    client.post_message(opportunity_id, riepilogo_odoo, attachment_ids=attachment_ids)
+                st.success("Documenti e riepilogo salvati nell'opportunita Odoo.")
+            except Exception as exc:
+                st.error(f"Salvataggio su Odoo non riuscito: {exc}")
