@@ -191,18 +191,6 @@ def _infer_sale_order_data(order, catalogo):
             best_panel = panel
             best_panel_score = score
 
-    best_battery = None
-    best_battery_score = 0
-    for battery in list(catalogo.get("batterie", [])) + list(catalogo.get("batterie_da_schede", [])):
-        score = _score_match(
-            combined_text,
-            battery.get("marca_modello"),
-            battery.get("capacita_kwh"),
-        )
-        if score > best_battery_score:
-            best_battery = battery
-            best_battery_score = score
-
     panel_line = None
     for line in lines:
         text = _line_text(line).lower()
@@ -216,6 +204,19 @@ def _infer_sale_order_data(order, catalogo):
         if any(word in text for word in battery_words):
             battery_line = line
             break
+
+    best_battery = None
+    best_battery_score = 0
+    if battery_line:
+        battery_match_text = _line_text(battery_line)
+        for battery in list(catalogo.get("batterie", [])) + list(catalogo.get("batterie_da_schede", [])):
+            score = _score_match(
+                battery_match_text,
+                battery.get("marca_modello"),
+            )
+            if score > best_battery_score:
+                best_battery = battery
+                best_battery_score = score
 
     number_panels = 0
     if panel_line:
@@ -247,16 +248,17 @@ def _infer_sale_order_data(order, catalogo):
                 r"potenza\s+pari\s+a\s+(\d{3,4})",
             ],
         )
-    battery_capacity = float((best_battery or {}).get("capacita_kwh") or 0)
-    if not battery_capacity:
-        battery_capacity = _first_match_number(
-            battery_text,
-            [
-                r"(\d+(?:[,.]\d+)?)\s*kwh",
-                r"accumulo\s+(?:da\s+)?(\d+(?:[,.]\d+)?)",
-                r"batteria\s+(?:da\s+)?(\d+(?:[,.]\d+)?)",
-            ],
-        )
+    battery_capacity = _first_match_number(
+        battery_text,
+        [
+            r"capacita(?:'|à)?\s+di\s+accumulo\s+(\d+(?:[,.]\d+)?)\s*kwh",
+            r"(\d+(?:[,.]\d+)?)\s*kwh",
+            r"accumulo\s+(?:da\s+)?(\d+(?:[,.]\d+)?)",
+            r"batteria\s+(?:da\s+)?(\d+(?:[,.]\d+)?)",
+        ],
+    )
+    if not battery_capacity and best_battery_score > 0:
+        battery_capacity = float((best_battery or {}).get("capacita_kwh") or 0)
 
     panel_description = _line_text(panel_line) if panel_line else ""
     battery_description = _line_text(battery_line) if battery_line else ""
@@ -272,7 +274,7 @@ def _infer_sale_order_data(order, catalogo):
         "tipo_pannelli": (best_panel or {}).get("tipo_pannelli") or _infer_panel_from_text(_product_label(panel_line) or panel_description),
         "modello_pannelli": (best_panel or {}).get("modello_pannelli") or "",
         "potenza_pannello_wp": panel_power or 465.0,
-        "batteria_nome": (best_battery or {}).get("marca_modello") or _product_label(battery_line) or ("Nessuna batteria" if not battery_line else "Batteria da preventivo Odoo"),
+        "batteria_nome": _product_label(battery_line) or (best_battery or {}).get("marca_modello") or ("Nessuna batteria" if not battery_line else "Batteria da preventivo Odoo"),
         "accumulo_kwh": battery_capacity,
         "descrizione_pannelli": panel_description,
         "descrizione_batteria": battery_description,
